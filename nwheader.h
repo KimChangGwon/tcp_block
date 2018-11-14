@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #define NUM_SEQ 0
 #define NUM_ACK 1
@@ -30,32 +31,15 @@ public:
     Packet(const U8 * buf, U32 bufSize);
     Packet(const Packet & rhs);
 
-    ~Packet(){ if(this->tcpData != nullptr)   delete[] tcpData; }
-
-    U32 getPacketSize(void) const { return packetSize; }
+    U32 getPacketSize(void) const { return sizeof(struct libnet_ethernet_hdr) + ntohs(ipHeader.ip_len); }
 
     const U8 * getSrcMac(void) const { return etherHeader.ether_shost; }
     const U8 * getDstMac(void) const { return etherHeader.ether_dhost; }
-    void printDstMac(void) const{
-        for(int a = 0; a<ETHER_ADDR_LEN; a=a+1) {
-            printf("%02X", etherHeader.ether_dhost[a]);
-            if(a < ETHER_ADDR_LEN - 1) cout << ':';
-        }
-        cout << endl;
-    }
-    void printSrcMac(void) const{
-        for(int a = 0; a<ETHER_ADDR_LEN; a=a+1) {
-            printf("%02X", etherHeader.ether_shost[a]);
-            if(a < ETHER_ADDR_LEN - 1) cout << ':';
-        }
-        cout << endl;
-    }
-
     U32 getIpProtocol(void) const { return ipHeader.ip_p; }
 
     U32 getSrcIpAddr(void) const{ return ntohl(ipHeader.ip_src.s_addr);}
     U32 getDstIpAddr(void) const{ return ntohl(ipHeader.ip_dst.s_addr);}
-    U32 getpayloadSize(void) const{ return payloadSize; }
+    U32 getpayloadSize(void) const{ return static_cast<U32>(tcpPayload.size()) ; }
     void setFlag(U8 flag){ this->tcpHeader.th_flags |= flag;  }
     void setIp(U32 srcIp, U32 dstIp){
         this->ipHeader.ip_src.s_addr = htonl(srcIp);
@@ -75,63 +59,97 @@ public:
             this->tcpHeader.th_seq = preNum;
             break;
         case NUM_ACK:
-            this->tcpHeader.th_ack = preNum + payloadSize;
+
+            this->tcpHeader.th_ack = preNum + getpayloadSize();
             break;
         }
     }
 
+    void setChksum(U8 * packetBuf){
+        U32 phsum = 0;
+        phsum = ((getSrcIpAddr() & 0xFFFF0000) >> 16) + (getSrcIpAddr() & 0xFFFF) + ((getDstIpAddr()& 0xFFFF0000) >> 16) + ((getDstIpAddr()& 0xFFFF))
+                + ipHeader.ip_p + static_cast<U32>((ntohs(ipHeader.ip_len) - (ipHeader.ip_hl << 2)));
+        while(phsum > 0xFFFF){
+            U8 carry = (phsum &0xFF0000) >> 16;
+            phsum = phsum & 0xFFFF;
+            phsum += carry;
+        }
+
+        U32 offset = sizeof(struct libnet_ethernet_hdr) + static_cast<U32>((ipHeader.ip_hl << 2));
+        U32 chksumOffset = offset + 0x10;
+        while(offset < sizeof(struct libnet_ethernet_hdr) + ntohs(ipHeader.ip_len)){
+            if(offset == chksumOffset){
+                offset = offset + 2;
+                continue;
+            }
+            U16 summer = *(packetBuf + (offset++));
+            summer <<= 8;
+            if(offset < sizeof(struct libnet_ethernet_hdr) + ntohs(ipHeader.ip_len))   summer |= *(packetBuf + (offset++));
+            phsum += summer;
+
+            while(phsum > 0xFFFF){
+                U8 carry = (phsum & 0xFF0000) >> 16;
+                phsum = phsum & 0xFFFF;
+                phsum += carry;
+            }
+        }
+        this->tcpHeader.th_sum = phsum & 0xFFFF;
+    }
+
     void makeMyPayload(void){
-        if(this->tcpData != nullptr) delete[] this->tcpData;
-        string tmpStr = "this is test string";
-        tcpData = new U8[tmpStr.size()];
-        memcpy(tcpData, tmpStr.c_str(), tmpStr.size());
+        if(this->tcpPayload.size() != 0)  {
+            tcpPayload.clear();
+        }
+        U16 ip_len = ntohs(static_cast<U16>(ipHeader.ip_len)) - static_cast<U16>(getpayloadSize());
+        string tmpstr = "tcp block";
+        tcpPayload = vector<U8>(tmpstr.size());
+        for(int a = 0; a<static_cast<U8>(tmpstr.size()); a=a+1) tcpPayload[a] = static_cast<U8>(tmpstr[a]);
+        ip_len += static_cast<U16>(getpayloadSize());
+        ipHeader.ip_len = htons(ip_len);
+    }
+
+    void makePacket(U8 * buf){
+        memcpy(buf, reinterpret_cast<U8*>(&(this->etherHeader)), sizeof(struct libnet_ethernet_hdr));
+        memcpy(buf + sizeof(struct libnet_ethernet_hdr), reinterpret_cast<U8*>(&(this->ipHeader)), sizeof(struct libnet_ipv4_hdr));
+        memcpy(buf + sizeof(struct libnet_ethernet_hdr) + (ipHeader.ip_hl << 2), reinterpret_cast<U8*>(&(this->tcpHeader)), sizeof(struct libnet_tcp_hdr));
+        for(U32 a = 0; a < getpayloadSize(); a=a+1){
+            *(buf + sizeof(struct libnet_ethernet_hdr) + (ipHeader.ip_hl <<2) + (tcpHeader.th_off << 2) + a) = tcpPayload[a];
+        }
     }
 
 private:
-    U32 packetSize;
-    U32 payloadSize;
+#pragma pack(1)
     struct libnet_ethernet_hdr etherHeader;
     struct libnet_ipv4_hdr ipHeader;
     struct libnet_tcp_hdr tcpHeader;
-
-    U8 * tcpData = nullptr;
+    vector<U8> tcpPayload;
 };
 
 Packet::Packet(const U8 * buf, U32 bufSize){
-    packetSize = bufSize;
-
+    U32 packetSize = bufSize;
     U32 ipOffset = sizeof(struct libnet_ethernet_hdr), tcpOffset;
     memcpy(&etherHeader, buf, sizeof(struct libnet_ethernet_hdr));
-    memcpy(&(ipHeader), buf + ipOffset, sizeof(struct libnet_ipv4_hdr));
+    memcpy(&ipHeader, buf + ipOffset, sizeof(struct libnet_ipv4_hdr));
 
     U32 ipHLen = (static_cast<U32>(ipHeader.ip_hl) << 2);
     tcpOffset = ipOffset + ipHLen;
     memcpy(&tcpHeader, buf + tcpOffset, sizeof(struct libnet_tcp_hdr));
 
     U32 tcpHLen = (static_cast<U32>(tcpHeader.th_off) << 2);
-    if(bufSize > sizeof(struct libnet_ethernet_hdr) + ipHLen + tcpHLen){
-        U32 extra = bufSize - (sizeof(struct libnet_ethernet_hdr) + ipHLen +  tcpHLen);
-        tcpData = static_cast<U8*>(malloc(sizeof(U8*) * extra));
-    }
-
-    payloadSize = packetSize- sizeof(struct libnet_ethernet_hdr) - ipHLen - tcpHLen;
+    U32 payloadSize = packetSize - sizeof(struct libnet_ethernet_hdr) - ipHLen - tcpHLen;
     if(payloadSize > 0){
-        tcpData = new U8[payloadSize];
-        memcpy(tcpData, buf + packetSize - payloadSize, payloadSize);
+        for(U32 a = 0; a < static_cast<U32>(payloadSize); a=a+1) tcpPayload.push_back(*(buf + packetSize - payloadSize + a));
     }
 }
 
 Packet::Packet(const Packet & rhs){
-    payloadSize = rhs.packetSize - sizeof(struct libnet_ethernet_hdr) -
-            (static_cast<U32>(rhs.ipHeader.ip_hl) << 2) - (static_cast<U32>(rhs.tcpHeader.th_off) << 2);
-    cout << payloadSize << " = payload size\n";
-
     memcpy(&(this->etherHeader), &(rhs.etherHeader), sizeof(struct libnet_ethernet_hdr));
     memcpy(&(this->ipHeader), &(rhs.ipHeader), sizeof(struct libnet_ipv4_hdr));
     memcpy(&(this->tcpHeader), &(rhs.tcpHeader), sizeof(struct libnet_tcp_hdr));
-    if(payloadSize > 0){
-        tcpData = new U8[payloadSize];
-        memcpy(this->tcpData, rhs.tcpData, sizeof(U8) * payloadSize);
+
+    if(rhs.getpayloadSize() > 0) {
+        tcpPayload = vector<U8>(rhs.tcpPayload.begin(), rhs.tcpPayload.end());
+
     }
 }
 

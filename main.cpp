@@ -1,4 +1,4 @@
-#include <nwheader.h>
+#include "nwheader.h"
 
 #define ERRBUF_SIZE 4096
 #define ETH_HDR_SIZE 14
@@ -15,12 +15,8 @@ typedef struct cbFuncArg{
 
 void print_error(string, char *);
 void cbfunc(u_char * usr_args, const struct pcap_pkthdr * packet_header, const U8 * packet);
-void dump(const U8 * buf, S32 size) ;
-void packetInjection(cbFuncArg * user_arg, const Packet & packetobj);
+void packetInjection(cbFuncArg * user_arg, Packet & originPacket);
 void GetMyMac(uint8_t * MacAddr, const char * interface);
-
-
-
 int main(void)
 {
     char errbuf[ERRBUF_SIZE];
@@ -28,13 +24,10 @@ int main(void)
     pcap_t * packet_handle;
     cbFuncArg argStruct;
     dev = pcap_lookupdev(errbuf);
-
-    dev = pcap_lookupdev(errbuf);
     GetMyMac(argStruct.MacAddr, dev);
 
     packet_handle = pcap_open_live(dev, ERRBUF_SIZE, 1, 200, errbuf);
     if(packet_handle == nullptr) print_error("cannot find packet handle", errbuf);
-
     argStruct.packet_handle = packet_handle;
     pcap_loop(packet_handle, 0, cbfunc, reinterpret_cast<u_char*>(&argStruct));
 
@@ -52,23 +45,14 @@ void print_error(string errPoint, char * msg){
 
 void cbfunc(u_char * usr_args, const struct pcap_pkthdr * packet_header, const U8 * packet){
     Packet packetobj(packet, static_cast<U32>(packet_header->len));
-    if(packetobj.getIpProtocol() == IPPROTO_TCP && packetobj.getSrcIpAddr() == 0xafd52327)
-    {
-       cout << "injection \n";
-       packetInjection(reinterpret_cast<cbFuncArg*>(usr_args) , packetobj);
-    }
+
+    if(packetobj.getIpProtocol() == IPPROTO_TCP) packetInjection(reinterpret_cast<cbFuncArg*>(usr_args), packetobj);
+
 }
 
-void packetInjection(cbFuncArg * user_arg, const Packet & originPacket){
-/*
- Things to do
- 4. checksum
- 5. confirm that the injection operates properly
- */
-
+void packetInjection(cbFuncArg * user_arg, Packet & originPacket){
     Packet rstPacket(originPacket);
     Packet finPacket(originPacket);
-
     rstPacket.setFlag(TH_RST);
     finPacket.setFlag(TH_FIN);
 
@@ -80,13 +64,22 @@ void packetInjection(cbFuncArg * user_arg, const Packet & originPacket){
     finPacket.makeMyPayload();
 
     finPacket.setNum(NUM_SEQ, originPacket.getNum(NUM_ACK));
-    finPacket.setNum(NUM_ACK, originPacket.getNum(NUM_SEQ) + finPacket.getpayloadSize());
+    finPacket.setNum(NUM_ACK, originPacket.getNum(NUM_SEQ));
 
-    cout << "rstPacket --------------------\n";
-    //dump((const U8*)(&rstPacket), rstPacket.getPacketSize());
-    puts("");
-    //pcap_inject(packet_handle, static_cast<void*>(&rstPacket), packetobj.getPacketSize());
-   // pcap_inject(packet_handle, static_cast<void*>(&finPacket), packetobj.getPacketSize());
+    U8 * finPacketBuf = new U8[finPacket.getPacketSize()];
+    U8 * rstPacketBuf = new U8[rstPacket.getPacketSize()];
+
+    finPacket.makePacket(finPacketBuf);
+    rstPacket.makePacket(rstPacketBuf);
+
+    finPacket.setChksum(finPacketBuf);
+    rstPacket.setChksum(rstPacketBuf);
+
+    pcap_inject(user_arg->packet_handle, rstPacketBuf, rstPacket.getPacketSize());
+    pcap_inject(user_arg->packet_handle, finPacketBuf, finPacket.getPacketSize());
+
+    delete[] finPacketBuf;
+    delete[] rstPacketBuf;
 }
 
 void GetMyMac(uint8_t * MacAddr, const char * interface){
@@ -118,13 +111,4 @@ void GetMyMac(uint8_t * MacAddr, const char * interface){
         }
     }
 
-}
-void dump(const U8 * buf, S32 size) {
-    int i;
-    for (i = 0; i < (size >= 48? 48 : size); i++) {
-        if (i % 16 == 0)
-            printf("\n");
-        printf("%02x ", buf[i]);
-    }
-    cout << endl;
 }
