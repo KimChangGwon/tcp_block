@@ -17,6 +17,8 @@ void print_error(string, char *);
 void cbfunc(u_char * usr_args, const struct pcap_pkthdr * packet_header, const U8 * packet);
 void packetInjection(cbFuncArg * user_arg, Packet & originPacket);
 void GetMyMac(uint8_t * MacAddr, const char * interface);
+int isHttp(const unsigned char * data);
+
 int main(void)
 {
     char errbuf[ERRBUF_SIZE];
@@ -46,9 +48,30 @@ void print_error(string errPoint, char * msg){
 void cbfunc(u_char * usr_args, const struct pcap_pkthdr * packet_header, const U8 * packet){
     Packet packetobj(packet, static_cast<U32>(packet_header->len));
 
-    if(packetobj.getIpProtocol() == IPPROTO_TCP) packetInjection(reinterpret_cast<cbFuncArg*>(usr_args), packetobj);
+    if(packetobj.getIpProtocol() == IPPROTO_TCP && isHttp((const U8*)packet))
+        packetInjection(reinterpret_cast<cbFuncArg*>(usr_args), packetobj);
 
 }
+
+int isHttp(const unsigned char * data){
+#define IP_PROTOCOLFILED_OFFSET 9
+#define TCP_HLENFILED_OFFSET 12
+#define HOSTOFFSET 16
+#define HOSTNAME 6
+    uint32_t ipHLen = (data[0] & 0xF) << 2;
+    uint8_t ipProtocol = data[IP_PROTOCOLFILED_OFFSET];
+    uint32_t tcpDataOffset = ipHLen + (((data[ipHLen + TCP_HLENFILED_OFFSET] & 0xF0) >> 4) << 2);
+    int of = 0;
+
+
+    if(tcpDataOffset > ipHLen && (!memcmp(data + tcpDataOffset, "GET", 3) || !memcmp(data + tcpDataOffset, "POST", 4))){
+            if(!memcmp(data + tcpDataOffset + HOSTOFFSET, "Host", 4)) {
+               return 1;
+            }
+    }
+    return 0;
+}
+
 
 void packetInjection(cbFuncArg * user_arg, Packet & originPacket){
     Packet rstPacket(originPacket);
