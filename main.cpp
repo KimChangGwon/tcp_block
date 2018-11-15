@@ -69,11 +69,12 @@ void packetInjection(cbFuncArg * user_arg, Packet & originPacket){
     U8 * finPacketBuf = new U8[finPacket.getPacketSize()];
     U8 * rstPacketBuf = new U8[rstPacket.getPacketSize()];
 
+    finPacket.setChksum(finPacketBuf);
+    rstPacket.setChksum(rstPacketBuf);
+    
     finPacket.makePacket(finPacketBuf);
     rstPacket.makePacket(rstPacketBuf);
 
-    finPacket.setChksum(finPacketBuf);
-    rstPacket.setChksum(rstPacketBuf);
 
     pcap_inject(user_arg->packet_handle, rstPacketBuf, rstPacket.getPacketSize());
     pcap_inject(user_arg->packet_handle, finPacketBuf, finPacket.getPacketSize());
